@@ -8,27 +8,147 @@
 import SwiftUI
 import MusicKit
 
+@MainActor
 struct ContentView: View {
 
-  @ObservedObject var viewModel = ViewModel()
+  let viewModel = ViewModel()
 
   var body: some View {
-    VStack {
-      Text("\(viewModel.localizedAuthorizationStatus)")
-      Text("Hello, world!")
-      Button("Request authorization") {
-        viewModel.request()
+
+    if viewModel.authorizationStatus == .authorized {
+      AuthorizedView(viewModel: viewModel)
+    } else {
+      VStack {
+        Text("\(viewModel.localizedAuthorizationStatus)")
+        Text("Hello, world!")
+        Button("Request authorization") {
+          viewModel.request()
+        }
       }
-      Button("Fetch") {
-        viewModel.fetch()
-      }
+      .padding()
+
     }
-    .padding()
+
   }
 }
 
+struct AuthorizedView: View {
+  
+  let viewModel: ViewModel
+
+  var body: some View {
+    NavigationStack {
+      if let playlist = viewModel.playlist {
+        List {
+          ForEach.init(playlist) { item in
+            NavigationLink {
+              PlaylistDetail(playlist: item)
+            } label: {
+              Self.makePlaylistView(item)
+            }
+          }
+        }
+      } else {
+        ProgressView()
+          .onAppear {
+            Task {
+              do {
+                try await viewModel.fetchPlaylist()
+              } catch {
+                print(error)
+              }
+            }
+          }
+
+      }
+    }
+
+  }
+
+  private static func makePlaylistView(_ playlist: MusicItemCollection<Playlist>.Element) -> some View {
+    VStack {
+      Text(playlist.name)
+      Text(playlist.curatorName ?? "")
+    }
+  }
+
+  struct PlaylistDetail: View {
+
+    let playlist: MusicItemCollection<Playlist>.Element
+
+    @State private var entries: MusicItemCollection<Playlist.Entry>?
+
+    var body: some View {
+
+      if let entries = entries {
+        List {
+          ForEach(entries) { track in
+            NavigationLink {
+              PlayerView(entry: track)
+            } label: {
+              Text(track.title)
+            }
+
+          }
+        }
+      } else {
+        ProgressView()
+          .task {
+            do {
+              let response = try await playlist.with([.entries, .tracks])
+              self.entries = response.entries
+
+            } catch {
+
+            }
+          }
+      }
+    }
+  
+
+  }
+
+}
+
+struct PlayerView: View {
+
+  let entry: MusicItemCollection<Playlist.Entry>.Element
+  let player: ApplicationMusicPlayer = .shared
+
+  var body: some View {
+    VStack {
+      Text(entry.title)
+      Text(entry.artistName ?? "")
+      HStack {
+        Button("1x") {
+          player.state.playbackRate = 1
+        }
+        Button("0.5x") {
+          player.state.playbackRate = 0.5
+        }
+      }
+      TimelineView(.animation(minimumInterval: 0.5, paused: false)) { _ in
+        Text("\(player.playbackTime)")
+      }
+    }
+    .onAppear {
+      player.queue = [entry]
+      Task {
+        try await player.play()
+      }
+    }
+    .onDisappear(perform: {
+      Task {
+        player.stop()
+      }
+    })
+  }
+
+}
+
 @MainActor
-final class ViewModel: ObservableObject {
+@Observable
+final class ViewModel {
 
   var localizedAuthorizationStatus: String {
     switch authorizationStatus {
@@ -45,7 +165,9 @@ final class ViewModel: ObservableObject {
     }
   }
 
-  @Published private(set) var authorizationStatus: MusicAuthorization.Status = .notDetermined
+  private(set) var authorizationStatus: MusicAuthorization.Status = .notDetermined
+
+  private(set) var playlist: MusicItemCollection<Playlist>?
 
   init() {
     self.authorizationStatus = MusicAuthorization.currentStatus
@@ -57,21 +179,13 @@ final class ViewModel: ObservableObject {
     }
   }
 
-  func fetch() {
+  func fetchPlaylist() async throws {
 
-    Task {
-      do {
-        let re = try await MusicLibraryRequest<Playlist>().response()
+    let request = MusicLibraryRequest<Playlist>.init()
 
-        re.items.map { item in
-          item
-        }
+    let response = try await request.response()
 
-        print(re)
-      } catch {
-        print(error)
-      }
-    }
+    self.playlist = response.items
 
   }
 
